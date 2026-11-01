@@ -184,7 +184,14 @@ def download_book(session, book_id):
 
         try:
             for path, url in sorted(files.items()):
-                response = fetch(session, url)
+                try:
+                    response = fetch(session, url)
+                except requests.exceptions.HTTPError as e:
+                    if "404" in str(e):
+                        # Some books have stray manifest entries; skip them.
+                        print("    skipping missing file: %s" % path)
+                        continue
+                    raise
                 content = response.content
                 if response.headers.get("Content-Type", "").split(";")[0].strip() in HTML_MEDIA_TYPES:
                     chapter_dir = os.path.dirname(path)
