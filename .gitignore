@@ -1,14 +1,10 @@
-.idea/
-.vscode/
-.DS_Store
+# session credentials — never commit
+cookies.json
 
-__pycache__/
-.venv/
-.env/
-
+# downloaded books
 Books/
 
-cookies.json
-*.log
-*.txt
-*.code-workspace
+# tool logs
+info_*.log
+__pycache__/
+.venv/

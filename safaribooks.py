@@ -11,6 +11,7 @@ import logging
 import argparse
 import requests
 import traceback
+from curl_cffi import requests as curl_requests
 from html import escape
 from random import random
 from lxml import html, etree
@@ -314,7 +315,9 @@ class SafariBooks:
         self.display = Display("info_%s.log" % escape(args.bookid))
         self.display.intro()
 
-        self.session = requests.Session()
+        # Use curl_cffi (Chrome TLS fingerprint) to get past Akamai bot protection,
+        # which blocks the standard `requests` TLS fingerprint with 403.
+        self.session = curl_requests.Session(impersonate="chrome")
         if USE_PROXY:  # DEBUG
             self.session.proxies = PROXIES
             self.session.verify = False
@@ -429,7 +432,7 @@ class SafariBooks:
                 **kwargs
             )
 
-            self.handle_cookie_update(response.raw.headers.getlist("Set-Cookie"))
+            self.handle_cookie_update(response.headers.get_list("Set-Cookie"))
 
             self.display.last_request = (
                 url, data, kwargs, response.status_code, "\n".join(
@@ -437,7 +440,7 @@ class SafariBooks:
                 ), response.text
             )
 
-        except (requests.ConnectionError, requests.ConnectTimeout, requests.RequestException) as request_exception:
+        except (curl_requests.exceptions.RequestException,) as request_exception:
             self.display.error(str(request_exception))
             return 0
 
