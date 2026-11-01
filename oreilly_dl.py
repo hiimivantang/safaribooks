@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import time
 import zipfile
 from html import escape
 from urllib.parse import unquote
@@ -144,6 +145,21 @@ def list_book_files(session, book_id):
     return files
 
 
+def fetch(session, url, tries=4):
+    """GET with retries: Akamai intermittently 403s bursts of requests."""
+    response = None
+    for attempt in range(tries):
+        response = session.get(url, timeout=120)
+        if response.status_code != 403:
+            break
+        wait = 30 * (attempt + 1)
+        print("    403 from Akamai, backing off %ds (attempt %d/%d)..."
+              % (wait, attempt + 1, tries))
+        time.sleep(wait)
+    response.raise_for_status()
+    return response
+
+
 def download_book(session, book_id):
     meta = get_json(session, "%s/api/v2/epubs/urn:orm:book:%s/" % (BASE_URL, book_id))
     title = meta.get("title", book_id)
@@ -168,8 +184,7 @@ def download_book(session, book_id):
 
         try:
             for path, url in sorted(files.items()):
-                response = session.get(url, timeout=120)
-                response.raise_for_status()
+                response = fetch(session, url)
                 content = response.content
                 if response.headers.get("Content-Type", "").split(";")[0].strip() in HTML_MEDIA_TYPES:
                     chapter_dir = os.path.dirname(path)
@@ -181,6 +196,7 @@ def download_book(session, book_id):
                 done += 1
                 if done % 20 == 0:
                     print("    %d/%d files..." % (done, len(files)))
+                time.sleep(0.2)  # go easy: bursts of rapid requests can earn an IP ban
         except requests.exceptions.RequestException:
             epub.close()
             os.remove(epub_path)  # don't leave a corrupt partial EPUB behind
