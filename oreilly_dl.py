@@ -21,8 +21,12 @@ import os
 import re
 import sys
 import zipfile
+from html import escape
+from urllib.parse import unquote
 
 from curl_cffi import requests
+from lxml import etree
+from lxml import html as lhtml
 
 PATH = os.path.dirname(os.path.realpath(__file__))
 COOKIES_FILE = os.path.join(PATH, "cookies.json")
@@ -37,6 +41,63 @@ CONTAINER_XML = """<?xml version="1.0" encoding="UTF-8"?>
   </rootfiles>
 </container>
 """
+
+# The API serves chapters as bare fragments (no <html> root) that use
+# `epub:type` without declaring the namespace, and reference assets by
+# absolute /api/v2/... URLs. EPUB readers need each chapter to be a valid
+# XHTML document with the epub namespace declared and relative asset paths.
+XHTML_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="en" lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>{title}</title>
+{css}
+</head>
+<body>
+{body}
+</body>
+</html>
+"""
+
+FILE_URL_PATTERN = r'(/api/v2/epubs/urn:orm:book:%s/files/)([^"\']+)'
+HTML_MEDIA_TYPES = ("text/html", "application/xhtml+xml")
+
+
+def fix_chapter(html_text, book_id, files, chapter_dir, title, css_href):
+    """Make a served chapter (fragment or full document) a valid XHTML document."""
+    # Rewrite absolute asset URLs (images, links) to local relative paths.
+    def rewrite(match):
+        path = unquote(match.group(2))
+        if path not in files:
+            return match.group(0)
+        return os.path.relpath(path, chapter_dir).replace(os.sep, "/")
+
+    html_text = re.sub(FILE_URL_PATTERN % re.escape(book_id), rewrite, html_text)
+
+    # Parse leniently (served HTML is not always well-formed XML), strip
+    # scripts and Akamai's bot-protection overlay, re-serialize as XHTML.
+    html_text = re.sub(r"^\s*<\?xml[^>]*\?>\s*", "", html_text)
+    doc = lhtml.fromstring(html_text)
+    for bad in doc.xpath("//script") + doc.xpath('//*[starts-with(@id, "sec-")]'):
+        bad.drop_tree()
+
+    if doc.tag == "html":
+        # Full document: declare namespaces on the root and serialize as XML.
+        doc.set("xmlns", "http://www.w3.org/1999/xhtml")
+        if "epub:" in html_text:
+            doc.set("xmlns:epub", "http://www.idpf.org/2007/ops")
+        return etree.tostring(doc, encoding="unicode", method="xml",
+                              doctype="<!DOCTYPE html>")
+
+    # Fragment: wrap it in a minimal XHTML document.
+    body = "\n".join(
+        etree.tostring(child, encoding="unicode", method="xml")
+        for child in doc.iterchildren()
+    ) or etree.tostring(doc, encoding="unicode", method="xml")
+
+    css = '  <link rel="stylesheet" type="text/css" href="%s"/>' % css_href if css_href else ""
+    return XHTML_TEMPLATE.format(title=escape(title), css=css, body=body)
 
 
 def load_session():
@@ -105,13 +166,25 @@ def download_book(session, book_id):
         epub.writestr(mimetype, "application/epub+zip")
         epub.writestr("META-INF/container.xml", CONTAINER_XML.format(opf_path=opf_path))
 
-        for path, url in sorted(files.items()):
-            response = session.get(url, timeout=120)
-            response.raise_for_status()
-            epub.writestr(path, response.content)
-            done += 1
-            if done % 20 == 0:
-                print("    %d/%d files..." % (done, len(files)))
+        try:
+            for path, url in sorted(files.items()):
+                response = session.get(url, timeout=120)
+                response.raise_for_status()
+                content = response.content
+                if response.headers.get("Content-Type", "").split(";")[0].strip() in HTML_MEDIA_TYPES:
+                    chapter_dir = os.path.dirname(path)
+                    css_href = os.path.relpath("epub.css", chapter_dir).replace(os.sep, "/") \
+                        if "epub.css" in files else ""
+                    content = fix_chapter(content.decode("utf-8", "replace"), book_id,
+                                          files, chapter_dir, title, css_href).encode("utf-8")
+                epub.writestr(path, content)
+                done += 1
+                if done % 20 == 0:
+                    print("    %d/%d files..." % (done, len(files)))
+        except requests.exceptions.RequestException:
+            epub.close()
+            os.remove(epub_path)  # don't leave a corrupt partial EPUB behind
+            raise
 
     print("    saved: %s" % epub_path)
     return epub_path
